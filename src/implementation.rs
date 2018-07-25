@@ -6,15 +6,12 @@ use ggez::{Context, GameResult};
 use ggez::graphics::{self, Image, Point2};
 use ggez::conf::NumSamples;
 
-use rayon::prelude::*;
-
-pub(crate) const SCREEN_RESOLUTION: (usize, usize) = (1920, 1080);
-
 #[derive(Debug)]
 pub(crate) struct Viewport {
     center: Point2,
     size: Point2,
     cache: Option<Image>,
+    resolution: (u32, u32),
 }
 
 gfx_defines!{
@@ -27,19 +24,20 @@ gfx_defines!{
 }
 
 impl Viewport {
-    pub(crate) fn from_xywh(x: f32, y: f32, w: f32, h: f32) -> Viewport {
+    pub(crate) fn from_xywh(x: f32, y: f32, w: f32, h: f32, resolution: (u32, u32)) -> Viewport {
         Viewport {
             center: Point2::new(x, y),
             size: Point2::new(w, h),
             cache: None,
+            resolution: resolution,
         }
     }
 
     fn screen_to_port(&self, point: Point2) -> Point2 {
         let real =
-            self.center.x - self.size.x / 2.0 + point.x * self.size.x / SCREEN_RESOLUTION.0 as f32;
+            self.center.x - self.size.x / 2.0 + point.x * self.size.x / self.resolution.0 as f32;
         let imag =
-            self.center.y - self.size.y / 2.0 + point.y * self.size.y / SCREEN_RESOLUTION.1 as f32;
+            self.center.y - self.size.y / 2.0 + point.y * self.size.y / self.resolution.1 as f32;
         let point = Point2::new(real, imag);
         point
     }
@@ -49,12 +47,8 @@ impl Viewport {
         shader: &graphics::Shader<AdditionalData>,
         ctx: &mut Context,
     ) -> GameResult<()> {
-        let canvas = graphics::Canvas::new(
-            ctx,
-            SCREEN_RESOLUTION.0 as u32,
-            SCREEN_RESOLUTION.1 as u32,
-            NumSamples::One,
-        )?;
+        let canvas =
+            graphics::Canvas::new(ctx, self.resolution.0, self.resolution.1, NumSamples::One)?;
         graphics::set_canvas(ctx, Some(&canvas));
 
         {
@@ -66,8 +60,8 @@ impl Viewport {
                 graphics::Rect {
                     x: 0.0,
                     y: 0.0,
-                    w: SCREEN_RESOLUTION.0 as f32,
-                    h: SCREEN_RESOLUTION.1 as f32,
+                    w: self.resolution.0 as f32,
+                    h: self.resolution.1 as f32,
                 },
             )?;
         }
@@ -112,12 +106,12 @@ impl Viewport {
     }
 
     pub(crate) fn to_data(&self) -> AdditionalData {
-        let iter = 256.0;// * (1.0 / self.size.x);
+        let iter = 256.0; // * (1.0 / self.size.x);
         AdditionalData {
             center: [self.center.x, self.center.y],
             size: [self.size.x, self.size.y],
             iter: iter as u32,
-            resolution: [SCREEN_RESOLUTION.0 as f32, SCREEN_RESOLUTION.1 as f32],
+            resolution: [self.resolution.0 as f32, self.resolution.1 as f32],
         }
     }
 }
@@ -125,23 +119,21 @@ impl Viewport {
 fn select_zoom_position_screen(
     ctx: &mut Context,
     screenshot: &Image,
-) -> GameResult<Option<Point2>> {
+) -> GameResult<Point2> {
     let width = screenshot.get_dimensions().w as usize;
     let height = screenshot.get_dimensions().h as usize;
 
     let color_converted = screenshot
         .to_rgba8(ctx)?
         .chunks(4)
-        .collect::<Vec<_>>()
-        .into_par_iter()
         .map(|chunk| (chunk[0], chunk[1], chunk[2], chunk[3]))
         .enumerate()
         .collect::<Vec<_>>();
 
     let maximum_brightness = color_converted
         .iter()
-        .max_by_key(|&(_, c)| c.0)
         .map(|&(_, c)| c.0)
+        .max()
         .expect("something is max");
 
     let allowed_positions = color_converted
@@ -152,7 +144,8 @@ fn select_zoom_position_screen(
 
     Ok(thread_rng()
         .choose(&allowed_positions)
-        .map(|&(x, y)| Point2::new(x as f32, y as f32)))
+        .map(|&(x, y)| Point2::new(x as f32, y as f32))
+        .expect("choice of allowed position"))
 }
 
 pub(crate) fn update(state: &mut MainState, ctx: &mut Context) -> GameResult<()> {
@@ -172,14 +165,9 @@ pub(crate) fn update(state: &mut MainState, ctx: &mut Context) -> GameResult<()>
     }
 
     if state.frame % 120 == 0 && state.port.cache.is_some() {
-        let position = {
-            let screenshot = state.port.cache.as_ref().expect("cache is some");
-            select_zoom_position_screen(ctx, screenshot)?
-        };
-
-        if let Some(pos) = position {
-            state.zoom_position = Some(state.port.screen_to_port(pos));
-        }
+        let screenshot = state.port.cache.as_ref().expect("cache is some");
+        let position = select_zoom_position_screen(ctx, screenshot)?;
+        state.zoom_position = Some(state.port.screen_to_port(position));
     }
 
     if let Some(pos) = state.zoom_position {
